@@ -6,36 +6,72 @@
 //#include <sys/stat.h>
 //#include <sys/types.h>
 #include <sys/wait.h>
+#include <fcntl.h>
 #include <unistd.h>
 
-// should be 514
 #define MAX_INPUT_SIZE 512
+#define MAX_TOKEN_SIZE 32
+#define MAX_NUM_TOKENS MAX_INPUT_SIZE/2
 
 #define STD_INPUT 0
 #define STD_OUTPUT 1
 
 void type_prompt() {
-        printf("shell: ");
+	printf("shell: ");
 }
 
 void print_error(char * error_msg) {
-        printf("ERROR: %s\n", error_msg);
+	printf("ERROR: %s\n", error_msg);
 }
 
-bool read_command (char buf[]) {
+void print_command(char ** parameters[]) {
+	printf("commands: \n");
+	int i = 0;
+	char **par = parameters[i++];
+	while (par != NULL) {
+		printf("command: ");
+		int j = 0;
+		char *p = par[j++];
+		while (p != NULL) {
+			printf("%s ", p);
+			p=par[j++];
+		}
+		printf("\n");
+		par = parameters[i++];
+	}
+	printf("\n");
+}
+
+void print_tokens(char * parameters[]) {
+	printf("tokens: ");
+	int i = 0;
+	char *par = parameters[i++];
+	while (par != NULL) {
+		//int j = 0;
+		//char *p = par[j++];
+		//while (p != NULL) {
+		printf("%s ", par);
+		//	p=par[j++];
+		//}
+		par = parameters[i++];
+	}
+	printf("\n");
+}
+
+bool read_command (char buffer[]) {
 	// check if EOF
-	if ( fgets(buf, MAX_INPUT_SIZE, stdin) == NULL ) {
+	if ( fgets(buffer, MAX_INPUT_SIZE, stdin) == NULL ) {
 		printf("\ngoodbye!\n");
 		exit(EXIT_SUCCESS);
 	}
 
 	//check if whitespace
-	if(buf[strspn(buf, " \f\r\t\v")] == '\n') {
+	if(buffer[strspn(buffer, " \f\r\t\v")] == '\n') {
 		return false;
 	}
 
-	// check if input too long	
-	if (strchr(buf, '\n') == NULL) {
+	// check if input too long
+	if (strchr(buffer, '\n') == NULL) {
 		// clear stdin
 		while ((getchar()) != '\n');
 
@@ -45,187 +81,230 @@ bool read_command (char buf[]) {
 	return true;
 }
 
-// ignore for now...
-bool parse_command(char buf[], char cmd[], char *par[]) {
+// at most one '<' token can be given for a single command
+// only the first command on the input line can have its input redirected
+// the '<' token must be followed by a token that represents a file name
 
-	char *delim = " \f\r\t\v";
+// at most one '>' token can be given for a single command
+// only the kast command on the input line can have its output redirected
+// the '>' token must be followed by a token that represents a file name
 
-        cmd[0] = '\0';
-	// do this or set par[i][0]= '\0'?
-        for(int i = 0; i < 256; i++) {
-                par[i] = NULL;
-        }
-	
-	char *p = strchr(buf, '\n');
-	*p = '\0';
-	
-	p = strtok(buf, delim);
+// the '&' token may only appear as the last token of a line
+bool parse_command(char buffer[], char **parameters[], char **input, char **output, bool * has_ampersand) {
+	char *saveptr;
+	char *delim = " \n\f\r\t\v";
+	char *delim2 = "<>|&";
+	int lens[MAX_NUM_TOKENS];
+	char *tokens[MAX_NUM_TOKENS];
+	char current_token[MAX_TOKEN_SIZE];
+	char** par;
+	bool has_redir_input = false;
+	bool has_redir_output = false;
+	int pipe_count = 0;
+	int token_count=0;
+	*input=NULL;
+	*output=NULL;
+	*has_ampersand = false;
 
-	int redir_input_count = 0;
-	int redir_output_count = 0;
-	int ampersand_count = 0;
-
-	//parse the line into words and place in par
-	int i = 0;
-	while( p != NULL ) {
-		// when we parse, we want to count the number of '<', '>', '&' 
-		// our input is only allowed to have at most one of each
-		if(strcmp(p, "<") == 0) {
-			redir_input_count = redir_input_count + 1;
-		} else if(strcmp(p, ">") == 0) {
-			redir_output_count = redir_output_count + 1;
-		} else if(strcmp(p, "&") == 0) {
-			ampersand_count = ampersand_count + 1;
-		}
-
-		if(redir_input_count > 1) {
-			print_error("at most one '<' token allowed");
-			return false;
-		} else if(redir_output_count > 1) {
-			print_error("at most one '>' token allowed");
-			return false;
-		} else if(ampersand_count > 1) {
-			print_error("at most one '&' token allowed");
-			return false;
-		}
-
-		par[i++] = strdup(p);
-		p = strtok(NULL, delim);
+	for (int i = 0; i < MAX_NUM_TOKENS; i++) {
+		parameters[i] = NULL;
+		lens[i] = 0;
+		tokens[i]=NULL;
 	}
 
-	// we are done parsing; i is the length of par
-	// we need to check if & is the last character
-	if (ampersand_count == 1) {
-		if (strcmp(par[i-1], "&") != 0) {
+	char *token = strtok_r(buffer, delim, &saveptr);
+	while (token != NULL) {
+		int token_index = 0;
+		for (int i = 0; i < strlen(token); i++) {
+			if(strpbrk(&token[i], delim2) == &token[i]) {
+				if(token_index!=0){
+					current_token[token_index]='\0';
+					tokens[token_count++]=strdup(current_token);
+					token_index=0;
+				}
+				current_token[0]=token[i];
+				current_token[1]='\0';
+				tokens[token_count++]=strdup(current_token);
+			} else {
+				current_token[token_index++]=token[i];
+			}
+		}
+		if(token_index!=0){
+			current_token[token_index]='\0';
+			tokens[token_count++]=strdup(current_token);
+			token_index=0;
+		}
+
+		token = strtok_r(NULL, delim, &saveptr);
+	}
+
+	// '| ls'
+	if (strcmp(tokens[0], "|") == 0) {
+		print_error("syntax error near unexpected token `|'");
+		return false;
+	}
+
+	par=malloc(sizeof(char**));
+	*par=malloc(sizeof(char*)*MAX_NUM_TOKENS);
+	for (int i = 0; i < token_count; i++) {
+		token=tokens[i];
+		if (strcmp(token, "|") == 0) {
+			if (has_redir_output) {
+				print_error("only the last command may have its output redirected");
+				return false;
+			}
+			if (lens[pipe_count] == 0) {
+				print_error("syntax error near unexpected token `|'");
+				return false;
+			}
+			par[lens[pipe_count]] = NULL;
+			parameters[pipe_count] = par;
+			par=malloc(sizeof(char**));
+			*par=malloc(sizeof(char*)*MAX_NUM_TOKENS);
+			pipe_count++;
+		} else if (strcmp(token, "<") == 0) {
+			if (has_redir_input) {
+				print_error("at most one '<' token allowed");
+				return false;
+			} else if (pipe_count > 0) {
+				print_error("only the first command may have its input redirected");
+				return false;
+			} else if (lens[pipe_count] == 0) {
+				print_error("a command must appear before input redirection");
+				return false;
+			} else {
+				if ((i+1)<token_count){
+					*input=tokens[i+1];
+					i++;
+					has_redir_input = true;
+				} else {
+					print_error("expected the name of a file");
+					return false;
+				}
+			}
+		} else if (strcmp(token, ">") == 0) {
+			if (has_redir_output) {
+				print_error("at most one '>' token allowed");
+				return false;
+			} else if (lens[pipe_count] == 0) {
+				print_error("a command must appear before output redirection");
+				return false;
+			} else {
+				if ((i+1)<token_count){
+					*output=tokens[i+1];
+					i++;
+					has_redir_output = true;
+				} else {
+					print_error("expected the name of a file");
+					return false;
+				}
+			}
+		} else if (strcmp(token, "&") == 0) {
+			if (*has_ampersand) {
+				print_error("at most one '&' token allowed");
+				return false;
+			} else {
+				*has_ampersand = true;
+			}
+		} else {
+			par[lens[pipe_count]++] = strdup(token);
+		}
+	}
+	par[lens[pipe_count]] = NULL;
+	parameters[pipe_count] = par;
+
+	// check if '&' is the last character
+	if (*has_ampersand) {
+		if (strcmp(tokens[token_count-1], "&") != 0) {
 			print_error("'&' must be last token of input line");
 			return false;
 		}
-
 	}
 
-	if (redir_output_count > 0) {
-		if (strcmp(par[i-2-ampersand_count], ">") != 0) {
-			print_error("expected '>' token and a file name at the end");
-			return false;
-		}
-	}
-
-	// first parameter is command
-	strncpy(cmd, par[0], 32);
-
-	par[i] = NULL;
 	return true;
-
 }
 
-void execute_command(char command[], char *parameters[]) {
-	if(command[0] == '\0') {
-		//idk
-		exit(1);
+void execute_command(char **parameters[], char **input, char **output, bool * has_ampersand) {
+	char **par;
+	int fd[2], status;
+	int in = STD_INPUT;
+	int num_commands = 0;
+	pid_t child_id;
+
+	par = parameters[0];
+	while(par != NULL) {
+		par = parameters[++num_commands];
 	}
-	if ( command[0] != '\n') {
 
-		char *par;
-		par = parameters[0];
+	for (int i = 0; i < num_commands; i++) {
+		par = parameters[i];
 
-		int coms[100];
-		int lens[100];
-		int dels[100];
-		for (int i = 0; i < 100; i++) {
-			coms[i] = 0;
-			lens[i] = 0;
-			dels[i] = 0;
+		if (pipe(fd) == -1) {
+			print_error("failed to create a pipe");
+			exit(EXIT_FAILURE);
 		}
 
-		int first = 1;
-		int n = 0;
-		int m = 0;
-		while(par != NULL) {
-			if(first) {
-				coms[m] = n;
-				first = 0;
+		switch (child_id = fork()) {
+		case -1:
+			print_error("failed to create a fork");
+			exit(EXIT_FAILURE);
+		//child
+		case 0:
+			if (i==0) {
+				if(*input) {
+					in = open(*input, O_RDONLY);
+				}
 			}
-			if ((strcmp(par, "|") == 0) | (strcmp(par, "<") == 0) | (strcmp(par, ">") == 0) | (strcmp(par, "&") == 0 ) ) {
-				dels[m] = n;
-				first = 1;
-				m = m + 1;
+			if (in!=STD_INPUT) {
+				dup2(in, STD_INPUT);
+				close(in);
+			}
+			
+			int out=fd[1];
+			if (i == num_commands-1) {
+				if (*output) {
+					//why 0644
+					out = open(*output, O_CREAT | O_RDWR | O_TRUNC, 0644);
+					dup2(out, STD_OUTPUT);
+					close(out);
+				}
 			} else {
-				lens[m] = lens[m] + 1;
+				dup2(out, STD_OUTPUT);
+				close(out);
 			}
 
-			n = n + 1;
-			par = parameters[n];
-		}
-
-		int pipes[256][2];
-		// needs to do some stuff first
-		char current_com[32], *current_par[256];
-		memcpy(current_com, command, 32);
-		memcpy(current_par, &parameters[0], lens[0]*sizeof(*parameters));
-
-		char *delimiter;
-		delimiter = parameters[dels[0]];
-
-		int x = 1;
-		// needs some condition
-		//while(current_com != NULL) {
-
-			// needs to be in a loop
-			int status;
-			pid_t child_id;
-
-			child_id = fork();
-			if (child_id != 0) {
+			// execvp returns only on failure
+			if (execvp(par[0], par)) {
+				printf("%s: command not found\n", par[0]);
+			}
+			exit(EXIT_FAILURE);
+		//parent
+		default:
+			close(fd[1]);
+			in = fd[0];
+			if(!*has_ampersand) {
+				// we may have to waitpid if pipes
 				wait(&status);
-			} else {
-				int i = 0;
-				char *param;
-				param = parameters[0];
-
-				while(param != NULL) {
-					i = i + 1;
-					param = parameters[i];
-				}
-
-				// then i is our length
-
-				/*if (i > 2) {
-					if (strcmp(parameters[i-ampersand_count-2], ">") == 0) {
-						// we found a >
-						// file should be param[i-1]
-						if (parameters[i-1] != NULL) {
-							int fd = open(parameters[i-1], O_CREAT | O_RDWR | O_TRUNC, 0644);
-							dup2(fd, STD_OUTPUT);
-							close(fd);
-							parameters[i-2] = NULL;
-							parameters[i-1] = NULL;
-							//i = i + 2;
-							//param = parameters[i];
-							//while(param != NULL) {
-							//      parameters[i-2] = param;
-							//      i = i + 1;
-							//      param = parameters[i];
-							//}
-						} else {
-							print_error("expected the name of a file");
-							exit(0);
-						}
-					}
-                                }*/
-
-				if (execvp(command, parameters) & ( command[0] != '\n')) {
-					print_error("command not found...");
-				}
-				exit(EXIT_SUCCESS);
 			}
-		//}
+			break;
+		}
 	}
+	if(!*has_ampersand) {
+                                // we may have to waitpid if pipes
+                                wait(0);
+                        }
+
+//wait(0);
+	close(in);
 }
 
 int main(int argc, char *argv[]) {
-
-	char buf[MAX_INPUT_SIZE];
-	char command[32], *parameters[256];
+	char buffer[MAX_INPUT_SIZE], **parameters[MAX_NUM_TOKENS];
+	char** input, **output;
+	bool* has_ampersand;
+	input=(char**)malloc(sizeof(char**));
+	output=(char**)malloc(sizeof(char**));
+	has_ampersand=(bool*)malloc(sizeof(bool*));
 
 	bool prompt = true;
 
@@ -240,14 +319,13 @@ int main(int argc, char *argv[]) {
 			type_prompt();
 		}
 
-		if (read_command(buf)) {
-			if (parse_command(buf, command, parameters)) {
-				execute_command(command, parameters);
+		if (read_command(buffer)) {
+			if (parse_command(buffer, parameters, input, output, has_ampersand)) {
+				//print_command(parameters);
+				execute_command(parameters, input, output, has_ampersand);
 			}
 		}
 	}
 
 	return 0;
-
 }
-
